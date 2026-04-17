@@ -1,0 +1,10 @@
+# Boilerplate for all macOS...
+
+\#*
+*~
+.DS_Store
+
+
+# Go-specific
+
+out
