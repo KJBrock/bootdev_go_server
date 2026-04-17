@@ -8,3 +8,7 @@
 # Go-specific
 
 out
+
+# Used by the REST client testing in VS Code
+
+*.http

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync/atomic"
 )
 
@@ -21,9 +23,10 @@ func main() {
 
 	//mux.Handle("/app/", http.StripPrefix("/app/", http.FileServer(http.Dir("."))))
 	mux.Handle("/app/", http.StripPrefix("/app/", apiCfg.middlewareMetricsInc(http.FileServer(http.Dir(".")))))
-	mux.HandleFunc("/healthz", healthzHandler)
-	mux.HandleFunc("/metrics", apiCfg.printMetricsHandler)
-	mux.HandleFunc("/reset", apiCfg.resetMetricsHandler)
+	mux.HandleFunc("GET /api/healthz", healthzHandler)
+	mux.HandleFunc("POST /api/validate_chirp", validateChirpHandler)
+	mux.HandleFunc("GET /admin/metrics", apiCfg.getMetricsHandler)
+	mux.HandleFunc("POST /admin/reset", apiCfg.resetMetricsHandler)
 	server.ListenAndServe()
 }
 
@@ -36,11 +39,18 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 }
 
 // Handlers
-func (cfg *apiConfig) printMetricsHandler(writer http.ResponseWriter, req *http.Request) {
-	writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+func (cfg *apiConfig) getMetricsHandler(writer http.ResponseWriter, req *http.Request) {
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 	writer.WriteHeader(200)
 
-	message := fmt.Sprintf("Hits: %d", cfg.fileserverHits.Load())
+	metricsTemplate := `<html>
+  <body>
+    <h1>Welcome, Chirpy Admin</h1>
+    <p>Chirpy has been visited %d times!</p>
+  </body>
+</html>
+`
+	message := fmt.Sprintf(metricsTemplate, cfg.fileserverHits.Load())
 	body := []byte(message)
 	_, err := writer.Write(body)
 	if err != nil {
@@ -64,4 +74,79 @@ func healthzHandler(writer http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		fmt.Printf("%v\n", err)
 	}
+}
+
+func sendErrorOr500(writer http.ResponseWriter, message string) {
+	type chirpRespError struct {
+		Error string `json:"error"`
+	}
+
+	respParams := chirpRespError{}
+	respParams.Error = message
+	data, err := json.Marshal(respParams)
+	if err != nil {
+		writer.WriteHeader(500)
+		return
+	}
+
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(400)
+	writer.Write(data)
+
+}
+
+func cleanString(dirty string, badWords map[string]interface{}) string {
+	words := strings.Split(dirty, " ")
+	for i, word := range words {
+		_, badWord := badWords[strings.ToLower(word)]
+		if badWord {
+			words[i] = "****"
+		}
+	}
+
+	return strings.Join(words, " ")
+}
+
+func validateChirpHandler(writer http.ResponseWriter, req *http.Request) {
+	type chirpReq struct {
+		Chirp string `json:"body"`
+	}
+
+	type chirpRespOk struct {
+		Cleaned string `json:"cleaned_body"`
+	}
+
+	reqParams := chirpReq{}
+
+	decoder := json.NewDecoder(req.Body)
+	err := decoder.Decode(&reqParams)
+	if err != nil {
+		sendErrorOr500(writer, "Invalid request JSON")
+		return
+	}
+
+	if len(reqParams.Chirp) > 140 {
+		sendErrorOr500(writer, "Chirp is too long")
+		return
+	}
+
+	respParams := chirpRespOk{}
+
+	badWords := map[string]interface{}{
+		"kerfuffle": nil,
+		"sharbert":  nil,
+		"fornax":    nil,
+	}
+
+	respParams.Cleaned = cleanString(reqParams.Chirp, badWords)
+
+	data, err := json.Marshal(respParams)
+	if err != nil {
+		writer.WriteHeader(500)
+		return
+	}
+
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(200)
+	writer.Write(data)
 }
