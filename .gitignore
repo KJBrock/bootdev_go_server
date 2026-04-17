@@ -3,11 +3,13 @@
 \#*
 *~
 .DS_Store
-
+.env
 
 # Go-specific
 
 out
+migrate.sh
+bootdev_go_server
 
 # Used by the REST client testing in VS Code
 
