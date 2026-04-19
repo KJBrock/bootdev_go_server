@@ -7,10 +7,11 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/KJBrock/bootdev_go_server/internal/database"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 )
@@ -18,6 +19,7 @@ import (
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
+	platform       string
 }
 
 func main() {
@@ -31,6 +33,7 @@ func main() {
 	}
 
 	apiCfg.dbQueries = database.New(db)
+	apiCfg.platform = os.Getenv("PLATFORM")
 
 	mux := http.NewServeMux()
 
@@ -42,7 +45,10 @@ func main() {
 	//mux.Handle("/app/", http.StripPrefix("/app/", http.FileServer(http.Dir("."))))
 	mux.Handle("/app/", http.StripPrefix("/app/", apiCfg.middlewareMetricsInc(http.FileServer(http.Dir(".")))))
 	mux.HandleFunc("GET /api/healthz", healthzHandler)
-	mux.HandleFunc("POST /api/validate_chirp", validateChirpHandler)
+	mux.HandleFunc("POST /api/users", apiCfg.createUserHandler)
+	mux.HandleFunc("POST /api/chirps", apiCfg.createChirpHandler)
+	mux.HandleFunc("GET /api/chirps", apiCfg.queryChirpsHandler)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.queryOneChirpHandler)
 	mux.HandleFunc("GET /admin/metrics", apiCfg.getMetricsHandler)
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetMetricsHandler)
 	server.ListenAndServe()
@@ -77,10 +83,70 @@ func (cfg *apiConfig) getMetricsHandler(writer http.ResponseWriter, req *http.Re
 }
 
 func (cfg *apiConfig) resetMetricsHandler(writer http.ResponseWriter, req *http.Request) {
+	if cfg.platform != "dev" {
+		writer.WriteHeader(503)
+		return
+	}
+
+	cfg.dbQueries.ClearUsers(req.Context())
+
 	cfg.fileserverHits.Store(0)
 
 	writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	writer.WriteHeader(200)
+}
+
+func (cfg *apiConfig) createUserHandler(writer http.ResponseWriter, req *http.Request) {
+	type createUser struct {
+		Email string `json:"email"`
+	}
+
+	userParams := createUser{}
+
+	decoder := json.NewDecoder(req.Body)
+	err := decoder.Decode(&userParams)
+	if err != nil {
+		sendErrorOr500(writer, "Invalid request JSON")
+		return
+	}
+
+	t := time.Now()
+	user, err := cfg.dbQueries.CreateUser(req.Context(),
+		database.CreateUserParams{
+			ID:        uuid.New(),
+			CreatedAt: t,
+			UpdatedAt: t,
+			Email:     userParams.Email,
+		})
+
+	if err != nil {
+		writer.WriteHeader(500)
+		return
+	}
+
+	type userResponse struct {
+		ID        string `json:"id"`
+		CreatedAt string `json:"created_at"`
+		UpdatedAt string `json:"updated_at"`
+		Email     string `json:"email"`
+	}
+
+	userInfo := userResponse{
+		ID:        user.ID.String(),
+		CreatedAt: user.CreatedAt.String(),
+		UpdatedAt: user.UpdatedAt.String(),
+		Email:     user.Email,
+	}
+
+	data, err := json.Marshal(userInfo)
+	if err != nil {
+		writer.WriteHeader(500)
+		return
+	}
+
+	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	writer.WriteHeader(201)
+	writer.Write(data)
 }
 
 func healthzHandler(writer http.ResponseWriter, req *http.Request) {
@@ -113,25 +179,93 @@ func sendErrorOr500(writer http.ResponseWriter, message string) {
 
 }
 
-func cleanString(dirty string, badWords map[string]interface{}) string {
-	words := strings.Split(dirty, " ")
-	for i, word := range words {
-		_, badWord := badWords[strings.ToLower(word)]
-		if badWord {
-			words[i] = "****"
-		}
-	}
-
-	return strings.Join(words, " ")
+type chirpData struct {
+	ID        string `json:"id"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+	Body      string `json:"body"`
+	UserID    string `json:"user_id"`
 }
 
-func validateChirpHandler(writer http.ResponseWriter, req *http.Request) {
-	type chirpReq struct {
-		Chirp string `json:"body"`
+func (cfg *apiConfig) queryChirpsHandler(writer http.ResponseWriter, req *http.Request) {
+
+	chirps, err := cfg.dbQueries.GetAllChirps(req.Context())
+	if err != nil {
+		sendErrorOr500(writer, "Server error, failed to get chirps")
+		return
 	}
 
-	type chirpRespOk struct {
-		Cleaned string `json:"cleaned_body"`
+	chirpList := []chirpData{}
+	for _, chirp := range chirps {
+		chirpList = append(chirpList, chirpData{
+			ID:        chirp.ID.String(),
+			CreatedAt: chirp.CreatedAt.String(),
+			UpdatedAt: chirp.UpdatedAt.String(),
+			Body:      chirp.Body,
+			UserID:    chirp.UserID.String(),
+		})
+	}
+
+	data, err := json.Marshal(chirpList)
+	if err != nil {
+		writer.WriteHeader(500)
+		return
+	}
+
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(200)
+	writer.Write(data)
+
+}
+
+func (cfg *apiConfig) queryOneChirpHandler(writer http.ResponseWriter, req *http.Request) {
+
+	fmt.Printf("\n")
+	chirpIDString := req.PathValue("chirpID")
+	if len(chirpIDString) == 0 {
+		fmt.Printf("\n")
+		writer.WriteHeader(400)
+		return
+	}
+
+	chirpID, err := uuid.Parse(chirpIDString)
+	if err != nil {
+		fmt.Printf("Error parsing UUID\n")
+		writer.WriteHeader(400)
+		return
+	}
+
+	chirp, err := cfg.dbQueries.GetChirp(req.Context(), chirpID)
+	if err != nil {
+		fmt.Printf("Error on DB query\n")
+		writer.WriteHeader(404)
+		return
+	}
+
+	cd := chirpData{
+		ID:        chirp.ID.String(),
+		CreatedAt: chirp.CreatedAt.String(),
+		UpdatedAt: chirp.UpdatedAt.String(),
+		Body:      chirp.Body,
+		UserID:    chirp.UserID.String(),
+	}
+	data, err := json.Marshal(cd)
+	if err != nil {
+		fmt.Printf("JSON marshal failed\n")
+		writer.WriteHeader(500)
+		return
+	}
+
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(200)
+	writer.Write(data)
+
+}
+
+func (cfg *apiConfig) createChirpHandler(writer http.ResponseWriter, req *http.Request) {
+	type chirpReq struct {
+		Chirp  string `json:"body"`
+		UserID string `json:"user_id"`
 	}
 
 	reqParams := chirpReq{}
@@ -143,20 +277,44 @@ func validateChirpHandler(writer http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	user_uuid, err := uuid.Parse(reqParams.UserID)
+	if err != nil {
+		sendErrorOr500(writer, "Invalid user id format")
+		return
+	}
+
+	user, err := cfg.dbQueries.GetUser(req.Context(), user_uuid)
+	if err != nil {
+		sendErrorOr500(writer, "User not found")
+		return
+	}
+
 	if len(reqParams.Chirp) > 140 {
 		sendErrorOr500(writer, "Chirp is too long")
 		return
 	}
 
-	respParams := chirpRespOk{}
-
-	badWords := map[string]interface{}{
-		"kerfuffle": nil,
-		"sharbert":  nil,
-		"fornax":    nil,
+	t := time.Now()
+	chirp, err := cfg.dbQueries.CreateChirp(req.Context(),
+		database.CreateChirpParams{
+			ID:        uuid.New(),
+			CreatedAt: t,
+			UpdatedAt: t,
+			Body:      reqParams.Chirp,
+			UserID:    user.ID,
+		})
+	if err != nil {
+		sendErrorOr500(writer, "Server error, failed to create chirp")
+		return
 	}
 
-	respParams.Cleaned = cleanString(reqParams.Chirp, badWords)
+	respParams := chirpData{
+		ID:        chirp.ID.String(),
+		CreatedAt: chirp.CreatedAt.String(),
+		UpdatedAt: chirp.UpdatedAt.String(),
+		Body:      chirp.Body,
+		UserID:    chirp.UserID.String(),
+	}
 
 	data, err := json.Marshal(respParams)
 	if err != nil {
@@ -165,6 +323,6 @@ func validateChirpHandler(writer http.ResponseWriter, req *http.Request) {
 	}
 
 	writer.Header().Set("Content-Type", "application/json")
-	writer.WriteHeader(200)
+	writer.WriteHeader(201)
 	writer.Write(data)
 }

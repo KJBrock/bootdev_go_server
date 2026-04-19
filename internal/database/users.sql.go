@@ -12,6 +12,15 @@ import (
 	"github.com/google/uuid"
 )
 
+const clearUsers = `-- name: ClearUsers :exec
+DELETE FROM users
+`
+
+func (q *Queries) ClearUsers(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, clearUsers)
+	return err
+}
+
 const createUser = `-- name: CreateUser :one
 INSERT INTO users (id, created_at, updated_at, email)
 VALUES (
@@ -38,6 +47,22 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		arg.UpdatedAt,
 		arg.Email,
 	)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Email,
+	)
+	return i, err
+}
+
+const getUser = `-- name: GetUser :one
+SELECT id, created_at, updated_at, email FROM users WHERE id = $1
+`
+
+func (q *Queries) GetUser(ctx context.Context, id uuid.UUID) (User, error) {
+	row := q.db.QueryRowContext(ctx, getUser, id)
 	var i User
 	err := row.Scan(
 		&i.ID,
