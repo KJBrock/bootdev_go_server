@@ -14,3 +14,4 @@ bootdev_go_server
 # Used by the REST client testing in VS Code
 
 *.http
+test_info.txt
